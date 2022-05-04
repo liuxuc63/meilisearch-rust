@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use actix_web::http::header::USER_AGENT;
-use actix_web::HttpRequest;
+use actix_web::{web::Query, HttpRequest};
 use http::header::CONTENT_TYPE;
 use meilisearch_auth::SearchRules;
 use meilisearch_lib::index::{SearchQuery, SearchResult};
@@ -28,6 +28,8 @@ use crate::Opt;
 
 use super::{config_user_id_path, MEILISEARCH_CONFIG_PATH};
 
+const MEILI_CUSTOM_USER_AGENT: &'static str = "x-meilisearch-client";
+
 /// Write the instance-uid in the `data.ms` and in `~/.config/MeiliSearch/path-to-db-instance-uid`. Ignore the errors.
 fn write_user_id(db_path: &Path, user_id: &str) {
     let _ = fs::write(db_path.join("instance-uid"), user_id.as_bytes());
@@ -43,12 +45,17 @@ fn write_user_id(db_path: &Path, user_id: &str) {
 const SEGMENT_API_KEY: &str = "P3FWhhEsJiEDCuEHpmcN9DHcK4hVfBvb";
 
 pub fn extract_user_agents(request: &HttpRequest) -> Vec<String> {
-    request
-        .headers()
-        .get(USER_AGENT)
-        .map(|header| header.to_str().ok())
-        .flatten()
-        .unwrap_or("unknown")
+    // first try to extract the custom query parameter
+    Query::<HashMap<String, String>>::from_query(request.query_string())
+        .ok()
+        .and_then(|query| query.get(MEILI_CUSTOM_USER_AGENT).map(ToString::to_string))
+        // if there wasn't any query parameter then extract the user-agent
+        .or(request
+            .headers()
+            .get(USER_AGENT)
+            .and_then(|header| header.to_str().ok())
+            .map(ToString::to_string))
+        .unwrap_or("unknown".to_string())
         .split(';')
         .map(str::trim)
         .map(ToString::to_string)
@@ -127,13 +134,9 @@ impl SegmentAnalytics {
 
 impl super::Analytics for SegmentAnalytics {
     fn publish(&self, event_name: String, mut send: Value, request: Option<&HttpRequest>) {
-        let user_agent = request
-            .map(|req| req.headers().get(USER_AGENT))
-            .flatten()
-            .map(|header| header.to_str().unwrap_or("unknown"))
-            .map(|s| s.split(';').map(str::trim).collect::<Vec<&str>>());
-
+        let user_agent = request.map(extract_user_agents);
         send["user-agent"] = json!(user_agent);
+
         let event = Track {
             user: self.user.clone(),
             event: event_name.clone(),
